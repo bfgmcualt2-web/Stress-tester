@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stress Tester UI (iPad-friendly)</title>
+  <style>
+    body{font-family:Arial,sans-serif;max-width:920px;margin:20px auto;padding:0 12px;line-height:1.4}
+    .card{border:1px solid #ddd;border-radius:10px;padding:14px;margin-bottom:12px}
+    label{display:block;margin-top:8px;font-weight:600}
+    input,select,textarea,button{width:100%;padding:10px;margin-top:4px}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    pre{background:#111;color:#0f0;padding:10px;border-radius:8px;overflow:auto}
+    .note{background:#fff8e1;border:1px solid #f5d67a;padding:10px;border-radius:8px}
+  </style>
+</head>
+<body>
+  <h1>Stress Tester UI (Works on iPad Safari)</h1>
+  <div class="note">
+    <strong>Important:</strong> This page cannot scan installed iPad apps. iOS browser pages do not have permission
+    to enumerate app list or inspect app internals. Target your app's backend API endpoint(s) instead.
+  </div>
+
+  <div class="card">
+    <label>Target profile</label>
+    <select id="profile">
+      <option value="custom">Custom endpoint</option>
+      <option value="jamf_trust">Jamf Trust (preset)</option>
+      <option value="example">Example app API (example.com/health)</option>
+    </select>
+
+    <div class="grid">
+      <div>
+        <label>App name (label only)</label>
+        <input id="appName" placeholder="My iPad App" />
+      </div>
+      <div>
+        <label>Target URL</label>
+        <input id="url" placeholder="https://api.example.com/health" />
+      </div>
+      <div>
+        <label>Method</label>
+        <select id="method"><option>GET</option><option>HEAD</option><option>POST</option><option>PUT</option><option>PATCH</option></select>
+      </div>
+      <div>
+        <label>Packets to send (request count)</label>
+        <input id="requests" type="number" value="100" min="1" />
+      </div>
+      <div>
+        <label>Concurrency</label>
+        <input id="concurrency" type="number" value="10" min="1" />
+      </div>
+      <div>
+        <label>Timeout (ms)</label>
+        <input id="timeout" type="number" value="10000" min="100" />
+      </div>
+      <div>
+        <label>Header (optional, Name: Value)</label>
+        <input id="header" placeholder="Authorization: Bearer ..." />
+      </div>
+    </div>
+
+    <label>Body (optional)</label>
+    <textarea id="body" rows="4" placeholder='{"ping":true}'></textarea>
+
+    <button id="run">Run browser stress test</button>
+    <button id="download">Download JSON report</button>
+  </div>
+
+  <div class="card">
+    <h3>Live Summary</h3>
+    <pre id="summary">No run yet.</pre>
+  </div>
+
+<script>
+let lastReport = null;
+
+const profiles = {
+  custom: {
+    appName: "",
+    url: ""
+  },
+  jamf_trust: {
+    appName: "Jamf Trust",
+    url: "https://your-jamf-domain.jamfcloud.com/healthCheck.html"
+  },
+  example: {
+    appName: "Example App",
+    url: "https://example.com/health"
+  }
+};
+
+document.getElementById('profile').addEventListener('change', (e) => {
+  const p = profiles[e.target.value] || profiles.custom;
+  document.getElementById('appName').value = p.appName || '';
+  document.getElementById('url').value = p.url || '';
+});
+
+function parseHeader(line){
+  if(!line || !line.includes(':')) return {};
+  const idx = line.indexOf(':');
+  const k = line.slice(0, idx).trim();
+  const v = line.slice(idx+1).trim();
+  return k ? {[k]:v} : {};
+}
+
+function percentile(arr, p){
+  if(!arr.length) return 0;
+  const s=[...arr].sort((a,b)=>a-b);
+  const r=(s.length-1)*p;
+  const lo=Math.floor(r), hi=Math.ceil(r);
+  if(lo===hi) return s[lo];
+  return s[lo] + (s[hi]-s[lo])*(r-lo);
+}
+
+async function hit(url, opts, timeoutMs){
+  const t0 = performance.now();
+  const ctrl = new AbortController();
+  const timer = setTimeout(()=>ctrl.abort(), timeoutMs);
+  try{
+    const res = await fetch(url, {...opts, signal:ctrl.signal});
+    const ms = performance.now()-t0;
+    return {ok: res.ok, status: res.status, latency_ms: ms};
+  }catch(e){
+    const ms = performance.now()-t0;
+    return {ok:false, status:null, latency_ms:ms, error:String(e)};
+  }finally{ clearTimeout(timer); }
+}
+
+async function runTest(){
+  const appName=document.getElementById('appName').value.trim() || 'Unlabeled app';
+  const url=document.getElementById('url').value.trim();
+  const method=document.getElementById('method').value;
+  const total=parseInt(document.getElementById('requests').value,10);
+  const conc=parseInt(document.getElementById('concurrency').value,10);
+  const timeoutMs=parseInt(document.getElementById('timeout').value,10);
+  const headerLine=document.getElementById('header').value.trim();
+  const bodyText=document.getElementById('body').value;
+
+  if(!url || total<1 || conc<1){ alert('Please enter valid URL/packets/concurrency.'); return; }
+
+  const headers=parseHeader(headerLine);
+  const opts={method, headers};
+  if(bodyText) opts.body=bodyText;
+
+  let scheduled=0;
+  const results=[];
+  const tStart=performance.now();
+
+  async function worker(){
+    while(true){
+      if(scheduled>=total) return;
+      scheduled += 1;
+      const r = await hit(url, opts, timeoutMs);
+      results.push(r);
+      if(results.length % Math.max(1, Math.floor(total/10))===0){
+        document.getElementById('summary').textContent = `Progress: ${results.length}/${total} packets`;
+      }
+    }
+  }
+
+  await Promise.all(Array.from({length: Math.min(conc,total)}, () => worker()));
+  const durationSec=(performance.now()-tStart)/1000;
+
+  const lat=results.map(r=>r.latency_ms);
+  const ok=results.filter(r=>r.ok).length;
+  const statusCodes={};
+  for(const r of results){
+    const key = r.status===null ? 'error' : String(r.status);
+    statusCodes[key]=(statusCodes[key]||0)+1;
+  }
+
+  lastReport={
+    target: { app_name: appName, url, method },
+    summary:{
+      packets_sent: results.length,
+      successful_requests: ok,
+      failed_requests: results.length-ok,
+      success_rate_percent: Number(((ok/results.length)*100).toFixed(2)),
+      duration_seconds: Number(durationSec.toFixed(3)),
+      requests_per_second: Number((results.length/durationSec).toFixed(2))
+    },
+    latency_ms:{
+      min:Number(Math.min(...lat).toFixed(2)),
+      max:Number(Math.max(...lat).toFixed(2)),
+      avg:Number((lat.reduce((a,b)=>a+b,0)/lat.length).toFixed(2)),
+      p50:Number(percentile(lat,0.5).toFixed(2)),
+      p95:Number(percentile(lat,0.95).toFixed(2)),
+      p99:Number(percentile(lat,0.99).toFixed(2))
+    },
+    status_codes: statusCodes,
+    note: 'Browser-based API test. CORS must allow your Pages domain.'
+  };
+
+  document.getElementById('summary').textContent = JSON.stringify(lastReport, null, 2);
+}
+
+document.getElementById('run').addEventListener('click', runTest);
+document.getElementById('download').addEventListener('click', ()=>{
+  if(!lastReport){ alert('Run a test first.'); return; }
+  const blob = new Blob([JSON.stringify(lastReport,null,2)], {type:'application/json'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='stress_report_browser.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+</script>
+</body>
+</html>
