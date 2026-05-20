@@ -1,0 +1,72 @@
+name: Stress Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Target URL"
+        required: true
+      requests:
+        description: "Total requests"
+        required: false
+        default: "300"
+      concurrency:
+        description: "Concurrent workers"
+        required: false
+        default: "30"
+      method:
+        description: "HTTP method (GET/HEAD/POST/PUT/PATCH)"
+        required: false
+        default: "GET"
+      header_1:
+        description: "Optional header 1 (Name: Value)"
+        required: false
+        default: ""
+      header_2:
+        description: "Optional header 2 (Name: Value)"
+        required: false
+        default: ""
+      body:
+        description: "Optional request body"
+        required: false
+        default: ""
+
+jobs:
+  run-stress-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run stress test
+        run: |
+          ARGS=(
+            --url "${{ github.event.inputs.url }}"
+            --requests "${{ github.event.inputs.requests }}"
+            --concurrency "${{ github.event.inputs.concurrency }}"
+            --method "${{ github.event.inputs.method }}"
+            --output stress_report.json
+          )
+
+          if [ -n "${{ github.event.inputs.header_1 }}" ]; then
+            ARGS+=(--header "${{ github.event.inputs.header_1 }}")
+          fi
+          if [ -n "${{ github.event.inputs.header_2 }}" ]; then
+            ARGS+=(--header "${{ github.event.inputs.header_2 }}")
+          fi
+          if [ -n "${{ github.event.inputs.body }}" ]; then
+            ARGS+=(--body "${{ github.event.inputs.body }}")
+          fi
+
+          python stress_tester.py "${ARGS[@]}"
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-report
+          path: stress_report.json
